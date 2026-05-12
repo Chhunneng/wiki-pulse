@@ -1,0 +1,8 @@
+kafka-python==2.0.2
+requests==2.31.0
+sseclient-py==1.9.0
+# kafka-python's snappy codec calls `import snappy`. python-snappy 0.7+ provides that
+# module as a pure-Python shim around cramjam (Rust, manylinux wheels) — so it installs
+# cleanly without a compiler or libsnappy on the host. Override KAFKA_COMPRESSION=gzip
+# in docker-compose.yml if you'd rather drop this dependency.
+python-snappy==0.7.3
