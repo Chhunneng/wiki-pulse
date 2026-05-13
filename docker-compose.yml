@@ -189,53 +189,6 @@ services:
       retries: 5
       start_period: 120s
 
-  # 3b. Watchdog — keeps the Spark streaming driver alive INSIDE main-bigdata-service.
-  #     Checks every WATCHDOG_INTERVAL_SECS; if the supervisor (and therefore Spark) isn't
-  #     running, it re-launches it via `docker exec`. Restart policy means the watchdog itself
-  #     auto-recovers after `docker compose restart` or a host reboot.
-  wiki-spark-watchdog:
-    image: docker:27-cli
-    container_name: wiki-spark-watchdog
-    depends_on:
-      main-bigdata-service:
-        condition: service_started
-      kafka:
-        condition: service_healthy
-      metrics-db:
-        condition: service_healthy
-    environment:
-      WATCHDOG_TARGET: wikipulse-main-bigdata
-      WATCHDOG_INTERVAL_SECS: "30"
-      WATCHDOG_STARTUP_GRACE_SECS: "60"
-      # Set to "1" to disable auto-restart (handy when you want to debug Spark manually).
-      WATCHDOG_PAUSED: "0"
-    volumes:
-      # Read-only socket: watchdog only needs to exec into siblings, not manage them.
-      - /var/run/docker.sock:/var/run/docker.sock:ro
-    entrypoint: ["/bin/sh", "-c"]
-    command:
-      - |
-        set -eu
-        echo "[watchdog $$(date -Iseconds)] starting; target=$$WATCHDOG_TARGET interval=$${WATCHDOG_INTERVAL_SECS}s"
-        sleep "$${WATCHDOG_STARTUP_GRACE_SECS}"
-        while true; do
-          if [ "$$WATCHDOG_PAUSED" = "1" ]; then
-            echo "[watchdog $$(date -Iseconds)] paused (WATCHDOG_PAUSED=1)"
-          else
-            if ! docker exec "$$WATCHDOG_TARGET" sh -c \
-                 'ps -eo pid,cmd 2>/dev/null | grep -E "[s]park_streaming_supervisor|[w]iki_pulse_stream|[S]parkSubmit.*wiki_pulse_stream" >/dev/null'; then
-              echo "[watchdog $$(date -Iseconds)] Spark not running — relaunching supervisor"
-              docker exec -d "$$WATCHDOG_TARGET" bash -lc \
-                'mkdir -p /opt/my_code/logs && nohup /opt/my_code/scripts/spark_streaming_supervisor.sh >> /opt/my_code/logs/spark_supervisor.log 2>&1 &' \
-                || echo "[watchdog $$(date -Iseconds)] WARN docker exec failed"
-            fi
-          fi
-          sleep "$${WATCHDOG_INTERVAL_SECS}"
-        done
-    restart: unless-stopped
-    networks:
-      - wikipulse_net
-
   # 4. Main Big Data Service (Professor's custom image)
   main-bigdata-service:
     image: mmukadam/cs523bdt-lab:v4.0

@@ -7,8 +7,10 @@ Uses two independent Kafka read streams (separate checkpoints) so we can write
 rollup_minute and rollup_action_minute without forking a single streaming sink.
 """
 
+
 from __future__ import annotations
 
+import logging
 import os
 import subprocess
 from datetime import timezone
@@ -58,6 +60,20 @@ KAFKA_MAX_POLL_RECORDS = os.environ.get("KAFKA_MAX_POLL_RECORDS", "1000")
 
 _EXPLAIN_COST_PRINTED = False
 
+logger = logging.getLogger(__name__)
+
+
+def _configure_logging() -> None:
+    if logger.handlers:
+        return
+    level_name = os.environ.get("WIKIPULSE_LOG_LEVEL", "INFO").upper()
+    level = getattr(logging, level_name, logging.INFO)
+    handler = logging.StreamHandler()
+    handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+    logger.setLevel(level)
+    logger.addHandler(handler)
+    logger.propagate = False
+
 
 def _hdfs_abs_path(uri: str) -> str:
     """Map ``hdfs:///a/b.csv`` or ``hdfs://localhost:9000/a/b.csv`` to ``hdfs dfs`` path ``/a/b.csv``."""
@@ -84,7 +100,7 @@ def _ensure_hdfs_lookup_exists(uri: str) -> None:
             check=False,
         )
     except (OSError, subprocess.TimeoutExpired) as ex:
-        print(f"WARN: could not run hdfs dfs -test for lookup CSV ({ex}); continuing.", flush=True)
+        logger.warning("could not run hdfs dfs -test for lookup CSV (%s); continuing.", ex)
         return
     if proc.returncode != 0:
         raise RuntimeError(
@@ -173,7 +189,7 @@ def _metrics_aux_tables_exist() -> None:
                         f'docker compose exec -T metrics-db psql -U wikipulse -d wiki_pulse_metrics '
                         f'< my_code/schemas/metrics_addon_rollups.sql'
                     )
-        print("metrics aux table rollup_action_minute present", flush=True)
+        logger.info("metrics aux table rollup_action_minute present")
     finally:
         conn.close()
 
@@ -379,6 +395,7 @@ def build_spark() -> SparkSession:
 
 
 def main() -> None:
+    _configure_logging()
     spark = build_spark()
     spark.sparkContext.setLogLevel(os.environ.get("SPARK_LOG_LEVEL", "WARN"))
 
@@ -396,10 +413,7 @@ def main() -> None:
         )
         .cache()
     )
-    print(
-        f"Wiki domain lookup CSV cached lazily path={LOOKUP_CSV}",
-        flush=True,
-    )
+    logger.info("Wiki domain lookup CSV cached lazily path=%s", LOOKUP_CSV)
 
     # Query 1 — totals (existing Parquet + rollup_minute)
     wm1 = streaming_watermarked_recentchange(spark, lookup_df)
@@ -477,13 +491,15 @@ def main() -> None:
     )
 
     active = spark.streams.active
-    print(f"Spark active streaming queries: {len(active)} (expect 2)", flush=True)
-
-    print(
-        f"Streaming queries started "
-        f"totals_id={q1.id} checkpoint={CHECKPOINT} parquet={HDFS_OUT}; "
-        f"actions_id={q2.id} checkpoint={CHECKPOINT_ACTION}",
-        flush=True,
+    logger.info("Spark active streaming queries: %s (expect 2)", len(active))
+    logger.info(
+        "Streaming queries started totals_id=%s checkpoint=%s parquet=%s; "
+        "actions_id=%s checkpoint=%s",
+        q1.id,
+        CHECKPOINT,
+        HDFS_OUT,
+        q2.id,
+        CHECKPOINT_ACTION,
     )
     spark.streams.awaitAnyTermination()
 

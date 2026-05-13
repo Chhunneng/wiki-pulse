@@ -187,8 +187,8 @@ def charts() -> None:
         return
     if df2.empty:
         st.info(
-            "No rollup rows in metrics Postgres yet. The Spark watchdog should be bringing "
-            "the streaming job up automatically — give it 1-2 minutes after `docker compose up -d`."
+            "No rollup rows in metrics Postgres yet. After `docker compose up -d`, follow "
+            "**Run the pipeline** in the repository README — allow 1–2 minutes for the first rollups."
         )
         return
     if used_fallback:
@@ -352,8 +352,8 @@ def charts() -> None:
             st.info(
                 "**`rollup_action_minute` is empty.** It is populated by Spark's second streaming "
                 "query (`action_by_type` checkpoint). After applying "
-                "`metrics_addon_rollups.sql`, restart Spark with `./my_code/scripts/start.sh` "
-                "and watch the supervisor log for `actions_id=`."
+                "`metrics_addon_rollups.sql`, restart Spark using **Run the pipeline** in the README "
+                "and watch `/opt/my_code/logs/spark_streaming.log` for `actions_id=`."
             )
         else:
             st.warning(
@@ -408,15 +408,14 @@ def main() -> None:
             hint = (
                 f"Rollups look **stale**: last `rollup_minute` UPSERT was about "
                 f"**{stale_m:.0f} minutes ago** (> {STALE_ROLLUP_MINUTES:.0f} min threshold). "
-                "Spark streaming has paused. `wiki-spark-watchdog` should re-launch it within "
-                "30-60 s. If this banner persists for 2+ min, run:\n\n"
-                "```\n./my_code/scripts/check.sh\n```\n\n"
-                "to see watchdog logs and Spark supervisor status."
+                "Spark streaming may have stopped. Follow **Run the pipeline** in the README "
+                "to launch it again. If this persists, use **Diagnose the stack** in the README "
+                "and inspect `/opt/my_code/logs/spark_streaming.log` inside `main-bigdata-service`."
             )
             st.warning(hint)
-            side.warning(f"Stale ~{stale_m:.0f} min — watchdog should recover automatically.")
+            side.warning(f"Stale ~{stale_m:.0f} min — see README **Run the pipeline**.")
     elif db_ok:
-        side.warning("Table `rollup_minute` is empty — start producer + Spark streaming job.")
+        side.warning("Table `rollup_minute` is empty — start the stack (`docker compose up -d`) then **Run the pipeline** in the README.")
 
     if db_ok:
         ar = fetch_action_row_estimate()
