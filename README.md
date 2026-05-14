@@ -21,6 +21,8 @@ docker compose up -d
 # Wait ~1–2 minutes the first time for Kafka and metrics-db to become healthy, then follow **Run the pipeline** below.
 ```
 
+**Do not skip Spark:** `docker compose up -d` only starts containers (Kafka, Postgres, producer, dashboard, …). It does **not** start the Spark streaming job. Until you run Spark **inside `main-bigdata-service`** with **`exec >>/opt/my_code/logs/spark_streaming.log 2>&1 /opt/my_code/scripts/run_spark_stream.sh`** (see **Run the pipeline** step 4), `rollup_minute` will not get new upserts—even if the dashboard loads. After a **host reboot**, **`docker compose restart`**, or stopping Spark by hand, start Spark again the same way.
+
 You need **Docker** and roughly **8 GB free RAM**. Ports `8501` (dashboard), `9085` (Kafka UI), `9870` (HDFS UI), `4040` (Spark UI), and `55432` (Postgres) must be free.
 
 All operational steps below use **`docker compose`** from the **repository root** (where `docker-compose.yml` lives). On Windows, use **PowerShell**, **WSL**, or **Git Bash** the same way.
@@ -58,18 +60,44 @@ docker compose restart wiki-producer
 docker compose logs wiki-producer --tail 20
 ```
 
-**4) Start Spark in the background** — default consumes **new** Kafka messages only (`KAFKA_STARTING_OFFSETS` defaults to `latest` in the driver). If Spark is already running and you want a clean restart, do **Stop Spark streaming** first.
+**4) Start Spark** — runs **inside** the `main-bigdata-service` container. Default Kafka offsets are **`latest`** (only new messages). If Spark is already running, do **Stop Spark streaming** first.
+
+**Recommended: shell in the container**, then start Spark with `exec` so stdout/stderr append to the log file and the script replaces your shell (you stay attached until Spark exits or you stop it):
+
+```bash
+docker compose exec -it main-bigdata-service bash
+```
+
+Inside the container:
+
+```bash
+mkdir -p /opt/my_code/logs
+chmod +x /opt/my_code/scripts/run_spark_stream.sh   # only if needed
+exec >>/opt/my_code/logs/spark_streaming.log 2>&1 /opt/my_code/scripts/run_spark_stream.sh
+```
+
+That line is the one Spark launch you need in-container: it runs [`run_spark_stream.sh`](my_code/scripts/run_spark_stream.sh), which ends with `exec spark-submit … wiki_pulse_stream.py`. **Do not** use `nohup … &` with Docker detached exec (the job can vanish when the wrapper shell exits).
+
+**Optional: one-shot from the repo host** (no interactive shell; Spark stays up because `exec` makes the script the main process of the detached `exec`):
 
 ```bash
 docker compose exec -d main-bigdata-service bash -lc \
-  'mkdir -p /opt/my_code/logs && nohup /opt/my_code/scripts/run_spark_stream.sh >> /opt/my_code/logs/spark_streaming.log 2>&1 &'
+  'mkdir -p /opt/my_code/logs && exec >>/opt/my_code/logs/spark_streaming.log 2>&1 /opt/my_code/scripts/run_spark_stream.sh'
 ```
 
-To **replay the whole Kafka topic** (typical right after **Reset rollups and replay from Kafka**), use `earliest` once:
+**Replay the whole Kafka topic** (e.g. after **Reset rollups and replay from Kafka**) — same as above, but set the env var for that launch only. From the host:
+
+```bash
+docker compose exec -it -e KAFKA_STARTING_OFFSETS=earliest main-bigdata-service bash
+```
+
+Then inside the container, the same `mkdir` + `exec >>… run_spark_stream.sh` lines as above.
+
+Or detached from the host:
 
 ```bash
 docker compose exec -d -e KAFKA_STARTING_OFFSETS=earliest main-bigdata-service bash -lc \
-  'mkdir -p /opt/my_code/logs && nohup /opt/my_code/scripts/run_spark_stream.sh >> /opt/my_code/logs/spark_streaming.log 2>&1 &'
+  'mkdir -p /opt/my_code/logs && exec >>/opt/my_code/logs/spark_streaming.log 2>&1 /opt/my_code/scripts/run_spark_stream.sh'
 ```
 
 **5) Wait 1–3 minutes**, then check rollups and open the dashboard:
@@ -90,7 +118,7 @@ docker compose exec -T main-bigdata-service bash -lc \
   'ps aux | grep -E "[r]un_spark_stream.sh|[w]iki_pulse_stream.py|[S]parkSubmit.*wiki_pulse"'
 ```
 
-You should see `run_spark_stream.sh`, `SparkSubmit … wiki_pulse_stream.py`, or `python3 …/wiki_pulse_stream.py`. If the command prints nothing, run **step 4** (and **steps 1–2** if this is a fresh volume). Then wait **2–4 minutes** (30 s trigger + 1 minute window + watermark) and recheck:
+You should see `run_spark_stream.sh`, `SparkSubmit … wiki_pulse_stream.py`, or `python3 …/wiki_pulse_stream.py`. If the command prints nothing, run **step 4** again (the `exec >>…log… run_spark_stream.sh` lines inside the container, or the detached one-liner), and **steps 1–2** if this is a fresh volume. Then wait **2–4 minutes** (30 s trigger + 1 minute window + watermark) and recheck:
 
 ```bash
 docker compose exec -T metrics-db psql -U wikipulse -d wiki_pulse_metrics -c \
@@ -142,7 +170,7 @@ Resume later with **Run the pipeline** again.
 
 ## Reset rollups and replay from Kafka
 
-Wipes `rollup_minute` / `rollup_action_minute` in metrics Postgres, deletes Spark checkpoints and the Parquet warehouse on HDFS, then you start Spark with **`KAFKA_STARTING_OFFSETS=earliest`** (see **Run the pipeline** step 4).
+Wipes `rollup_minute` / `rollup_action_minute` in metrics Postgres, deletes Spark checkpoints and the Parquet warehouse on HDFS, then you start Spark with **`KAFKA_STARTING_OFFSETS=earliest`** (see **Run the pipeline** step 4 — `docker compose exec -it -e KAFKA_STARTING_OFFSETS=earliest …` then the in-container `exec >>…` lines, or the detached `earliest` one-liner).
 
 **1) Stop Spark** — **Stop Spark streaming** above.
 
@@ -169,7 +197,7 @@ docker compose exec -T main-bigdata-service bash -lc "
 "
 ```
 
-**4) Run the pipeline** using the **`earliest`** `docker compose exec` line in **Run the pipeline** step 4.
+**4) Start Spark with `earliest`** — use **Run the pipeline** step 4: either `docker compose exec -it -e KAFKA_STARTING_OFFSETS=earliest main-bigdata-service bash` then the in-container `mkdir` + `exec >>… run_spark_stream.sh` lines, or the detached **`earliest`** one-liner from that step.
 
 ---
 
@@ -244,7 +272,8 @@ docker compose exec -T main-bigdata-service bash -lc '
 | Goal | Where |
 |---|---|
 | Start containers | `docker compose up -d` |
-| Start Spark + prerequisites | **Run the pipeline** |
+| Start Spark + prerequisites | **Run the pipeline** (HDFS steps + **`exec >>…log… run_spark_stream.sh`** inside `main-bigdata-service`, or the detached one-liner) |
+| Rollups not growing / `last_upsert` stuck | Spark is likely off — see **Run the pipeline** → *If `rollup_minute_rows` never grows* (confirm `ps`, then step **4**) |
 | Stop Spark only | **Stop Spark streaming** |
 | Wipe rollups + HDFS state + replay Kafka | **Reset rollups and replay from Kafka** |
 | Debug | **Diagnose the stack** |
@@ -275,7 +304,7 @@ Inside the `wikipulse_net` Docker network the hostnames are `kafka-server:9092`,
 | Process | [`my_code/spark/wiki_pulse_stream.py`](my_code/spark/wiki_pulse_stream.py) | Two parallel structured streaming queries; broadcast-joins to a small lookup CSV on HDFS; minute-windowed counts; writes upserts to Postgres and Parquet to HDFS. |
 | Schemas | [`my_code/schemas/metrics_init.sql`](my_code/schemas/metrics_init.sql) | `rollup_minute` (totals) + `rollup_action_minute` (per `type` / minor) — both indexed for the staleness probe. |
 | Dashboard | [`my_code/dashboard/app.py`](my_code/dashboard/app.py) | Streamlit, auto-refreshing every `STREAMLIT_REFRESH_SECS` (default 15 s). |
-| Spark launcher | [`my_code/scripts/run_spark_stream.sh`](my_code/scripts/run_spark_stream.sh) | One-shot: ensures HDFS paths + lookup CSV, tries `psycopg2` install if missing, then `spark-submit` of `wiki_pulse_stream.py` inside `main-bigdata-service`. Start it with **Run the pipeline** in this README; if the driver stops, run **Stop Spark streaming** then **Run the pipeline** again. |
+| Spark launcher | [`my_code/scripts/run_spark_stream.sh`](my_code/scripts/run_spark_stream.sh) | One-shot: HDFS prep + `spark-submit` of `wiki_pulse_stream.py` **inside** `main-bigdata-service`. Start it with **`exec >>/opt/my_code/logs/spark_streaming.log 2>&1 /opt/my_code/scripts/run_spark_stream.sh`** (see **Run the pipeline**). If the driver stops, **Stop Spark streaming** then start again. |
 
 Static enrichment file: [`my_code/static/wiki_domains.csv`](my_code/static/wiki_domains.csv) — uploaded to `hdfs:///data/static/wiki_domains.csv` on first start.
 
@@ -295,6 +324,11 @@ API reference for the SSE payload: [`wiki-apidoc-for-stream.json`](wiki-apidoc-f
 | `KAFKA_LINGER_MS`, `KAFKA_BATCH_SIZE` | `20`, `32768` | Bigger batches = higher throughput, more latency. |
 | `PRODUCER_HEARTBEAT_SECS` | `30` | INFO heartbeat with running totals; `0` to silence. |
 | `PRODUCER_FLUSH_EVERY_SECS` | `10` | Bounded loss window if the container is killed. |
+| `SSE_READ_TIMEOUT_SEC` | `120` | Max seconds **without bytes** on the SSE body before `requests` raises a read timeout and the client reconnects. Prevents a silent hang (no heartbeats) when the TCP connection stays open but stalls. Set `0` / `false` / `off` to disable (not recommended). |
+| `SSE_STALL_LOG_SEC` | `0` in code; `90` in [`docker-compose.yml`](docker-compose.yml) | If **> 0**, a daemon thread logs a **WARNING** when the SSE iterator has made no progress for this long (observability only; `SSE_READ_TIMEOUT_SEC` still enforces the hard limit). |
+| `SSE_CONNECT_TIMEOUT_SEC` | `15` | TCP + TLS connect timeout for the initial Wikimedia HTTP request. |
+
+**`wiki-producer` Docker healthcheck:** the service can show **healthy** while only proving **Kafka accepts a TCP connection**. It does **not** prove that Wikimedia SSE is sending events or that the producer loop is advancing—use logs (`heartbeat`, `SSE read timed out`, stall warnings) for that.
 
 ### Spark
 
@@ -307,6 +341,7 @@ API reference for the SSE payload: [`wiki-apidoc-for-stream.json`](wiki-apidoc-f
 | `KAFKA_MAX_OFFSETS_PER_TRIGGER` | `50000` | Cap per micro-batch (back-pressure). |
 | `SPARK_SQL_SHUFFLE_PARTITIONS` | `8` | Bump to 64+ on a real cluster. |
 | `SPARK_RUNTIME_VERSION` | `3.1.2` | Must match the Spark in the lab image; sets the `spark-sql-kafka` package version. |
+| `WIKIPULSE_PARQUET_WRITE_COALESCE` | `1` | Number of Spark tasks writing each micro-batch’s Parquet to `WIKIPULSE_HIVE_WAREHOUSE`. **`1`** avoids parallel `_temporary/` writers that often cause `DFSClient` / lease `FileNotFoundException` on small Docker HDFS. Raise (e.g. `4`) only if you need faster Parquet writes on a real cluster. |
 
 ### Dashboard
 
@@ -336,14 +371,17 @@ The defaults target a laptop. When data volume goes up, change knobs in this ord
 
 | Symptom | Try |
 |---|---|
-| `rollup_minute` row count flat / `last_upsert` old | Spark is probably **not running**. Check with **Run the pipeline** → *If rollup_minute_rows never grows*. After `docker compose up` or reboot you must launch Spark again (step 4). |
+| `rollup_minute` row count flat / `last_upsert` old | Spark is probably **not running**. Check with **Run the pipeline** → *If rollup_minute_rows never grows*. After `docker compose up` or reboot you must start Spark again (**step 4** — in-container `exec >>… run_spark_stream.sh` or detached one-liner). |
+| `docker compose exec -d … nohup … &` but Spark never appears in `ps` | Use the in-container **`exec >>/opt/my_code/logs/spark_streaming.log 2>&1 /opt/my_code/scripts/run_spark_stream.sh`** flow, or the detached **`bash -lc '… exec >>… run_spark_stream.sh'`** one-liner from **Run the pipeline** (no `nohup … &`). |
 | `port is already allocated` | Another process is using one of the ports listed above. |
 | `docker compose ps wiki-producer` keeps restarting | `docker compose logs wiki-producer --tail 50`. Most often Kafka isn't healthy yet — wait, or check `docker compose logs kafka`. |
 | `rollup_action_minute` missing on an older volume | `docker compose exec -T metrics-db psql -U wikipulse -d wiki_pulse_metrics < my_code/schemas/metrics_addon_rollups.sql`, then **Run the pipeline** (restart Spark). |
 | Spark log shows `Lookup CSV missing on HDFS` | **Run the pipeline** step 2 uploads from `/opt/my_code/static/wiki_domains.csv`. `run_spark_stream.sh` also tries on each launch. If the file is missing, the bind mount in `docker-compose.yml` is broken. |
 | Spark log shows WARN `HDFSBackedStateStoreProvider` / `InterruptedException` | Usually **normal** (state store loading, HDFS client lifecycle). Use the **Last Spark driver problem** snippet in **Diagnose the stack**—it ignores generic `Exception` so benign Java traces are not mistaken for failures. |
+| Spark log: `DFSClient` / `FileNotFoundException` … `_temporary` … `does not have any open files` | Usually **parallel Parquet tasks + HDFS** (or **two Spark drivers** writing the same warehouse). Ensure **only one** `wiki_pulse_stream` job runs (**Stop Spark streaming** then start once). Defaults use **`WIKIPULSE_PARQUET_WRITE_COALESCE=1`** to serialize Parquet writes. If it still happens, **Stop Spark**, remove stale temp data `hdfs dfs -rm -r -f /user/cloudera/wiki_pulse/warehouse/wiki_window_agg/_temporary` (safe; leaves committed partitions), then **Run the pipeline** again. |
 | Spark log shows real `ERROR` / `Traceback` | Read the block printed by **Last Spark driver problem**; fix the root cause, then **Stop Spark streaming** and **Run the pipeline** again. |
 | Producer reconnect spam | Wikimedia SSE has intermittent disconnects; the producer reconnects with backoff — normal. |
+| Producer **healthy** in `docker compose ps` but no log lines / no heartbeats | Healthcheck only checks **Kafka TCP**, not SSE. The process may be **blocked on a stalled SSE read**. Use `SSE_READ_TIMEOUT_SEC` (default `120`) and `SSE_STALL_LOG_SEC` (see compose). After changing [`producer.py`](my_code/producer/producer.py), rebuild: `docker compose build wiki-producer && docker compose up -d wiki-producer`. |
 | Two Postgres databases confuse you | `metrics-db` (port `55432`, DB `wiki_pulse_metrics`) is the rollup store. `postgres-db` (port `5432`, DB `hive_metastore`) is Hive's metastore — never write rollups there. |
 
 Need a deeper view: `docker compose exec main-bigdata-service tail -f /opt/my_code/logs/spark_streaming.log`, or open the Spark UI at http://localhost:4040 while the job runs.

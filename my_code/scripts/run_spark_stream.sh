@@ -2,10 +2,12 @@
 # One-shot Spark Structured Streaming driver — runs INSIDE main-bigdata-service.
 # Prerequisites + single spark-submit (no restart loop).
 #
-# From the repo host, follow README **Run the pipeline** (docker compose exec …).
-# Manual run inside the container:
-#   chmod +x /opt/my_code/scripts/run_spark_stream.sh   # if the bind mount is not executable
-#   nohup /opt/my_code/scripts/run_spark_stream.sh >> /opt/my_code/logs/spark_streaming.log 2>&1 &
+# Start Spark inside main-bigdata-service (see README **Run the pipeline** step 4):
+#   mkdir -p /opt/my_code/logs
+#   exec >>/opt/my_code/logs/spark_streaming.log 2>&1 /opt/my_code/scripts/run_spark_stream.sh
+# From repo host without an interactive shell (detached):
+#   docker compose exec -d main-bigdata-service bash -lc \
+#     'mkdir -p /opt/my_code/logs && exec >>/opt/my_code/logs/spark_streaming.log 2>&1 /opt/my_code/scripts/run_spark_stream.sh'
 #
 # To stop Spark, see README **Stop Spark streaming**.
 

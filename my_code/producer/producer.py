@@ -9,6 +9,7 @@ import json
 import logging
 import os
 import sys
+import threading
 import time
 from dataclasses import dataclass
 
@@ -35,6 +36,13 @@ USER_AGENT = os.environ.get(
     "https://foundation.wikimedia.org/wiki/Policy:Wikimedia_Reuse)",
 )
 T_CONNECT = float(os.environ.get("SSE_CONNECT_TIMEOUT_SEC", "15"))
+# Per-read timeout on the SSE body (seconds). Prevents silent hang if the socket stays open
+# but no bytes arrive. Set SSE_READ_TIMEOUT_SEC=0 to disable (not recommended).
+_SSE_READ_RAW = os.environ.get("SSE_READ_TIMEOUT_SEC", "120").strip().lower()
+if _SSE_READ_RAW in ("", "0", "none", "false", "off"):
+    SSE_READ_TIMEOUT: float | None = None
+else:
+    SSE_READ_TIMEOUT = float(_SSE_READ_RAW)
 BACKOFF_0 = float(os.environ.get("SSE_RECONNECT_BASE_SEC", "2"))
 BACKOFF_CAP = float(os.environ.get("SSE_RECONNECT_MAX_SEC", "120"))
 
@@ -42,6 +50,8 @@ BACKOFF_CAP = float(os.environ.get("SSE_RECONNECT_MAX_SEC", "120"))
 HEARTBEAT_SECS = float(os.environ.get("PRODUCER_HEARTBEAT_SECS", "30"))
 # Bounded loss window: flush buffered records every N seconds.
 FLUSH_EVERY_SECS = float(os.environ.get("PRODUCER_FLUSH_EVERY_SECS", "10"))
+# If > 0, a daemon thread logs when no SSE iterator progress for this many seconds (observability).
+SSE_STALL_LOG_SEC = float(os.environ.get("SSE_STALL_LOG_SEC", "0"))
 
 # Durability + throughput knobs. Defaults give acks=all + ordered delivery (idempotence-lite)
 # at the cost of throughput. Override KAFKA_ENABLE_IDEMPOTENCE=false on a real cluster.
@@ -109,7 +119,18 @@ def _event_key(payload: dict) -> bytes | None:
 
 
 def run() -> None:
-    log.info("Producer running topic=%s bootstrap=%s", TOPIC, BOOTSTRAP)
+    read_t = SSE_READ_TIMEOUT
+    log.info(
+        "Producer running topic=%s bootstrap=%s sse_read_timeout=%s",
+        TOPIC,
+        BOOTSTRAP,
+        f"{read_t}s" if read_t is not None else "disabled (unsafe)",
+    )
+    if read_t is None:
+        log.warning(
+            "SSE_READ_TIMEOUT_SEC is off — a stalled SSE connection can block forever with no logs"
+        )
+
     session = requests.Session()
     headers = {"User-Agent": USER_AGENT, "Accept": "text/event-stream"}
     prod: KafkaProducer | None = None
@@ -119,6 +140,33 @@ def run() -> None:
     sent_at_last_heartbeat = 0
     last_flush = time.monotonic()
     last_heartbeat = time.monotonic()
+
+    last_sse_activity = {"t": time.monotonic()}
+    stall_warned = False
+
+    def _touch_sse_activity() -> None:
+        last_sse_activity["t"] = time.monotonic()
+        nonlocal stall_warned
+        stall_warned = False
+
+    def _stall_watchdog() -> None:
+        nonlocal stall_warned
+        interval = max(10.0, SSE_STALL_LOG_SEC / 2.0)
+        while True:
+            time.sleep(interval)
+            idle = time.monotonic() - last_sse_activity["t"]
+            if idle >= SSE_STALL_LOG_SEC:
+                if not stall_warned:
+                    log.warning(
+                        "No SSE iterator progress for %.0fs (connection may be stale; "
+                        "read timeout should still break the wait)",
+                        idle,
+                    )
+                    stall_warned = True
+
+    if SSE_STALL_LOG_SEC > 0:
+        threading.Thread(target=_stall_watchdog, name="sse-stall-watchdog", daemon=True).start()
+        log.info("SSE stall watchdog enabled warn_after=%ss", SSE_STALL_LOG_SEC)
 
     def reconnect_wait(reason: str) -> None:
         nonlocal backoff
@@ -138,14 +186,19 @@ def run() -> None:
                 continue
 
         try:
+            req_timeout: float | tuple[float, float | None] = (
+                (T_CONNECT, read_t) if read_t is not None else (T_CONNECT, None)
+            )
             with session.get(
-                SSE_URL, stream=True, headers=headers, timeout=(T_CONNECT, None)
+                SSE_URL, stream=True, headers=headers, timeout=req_timeout
             ) as resp:
                 resp.raise_for_status()
                 backoff = BACKOFF_0
                 log.info("SSE connected (HTTP %s) - reading events", resp.status_code)
+                _touch_sse_activity()
 
                 for ev in EventSource(resp).events():
+                    _touch_sse_activity()
                     if (ev.event or "").strip() not in ("", "message"):
                         continue
                     raw = (ev.data or "").strip()
@@ -194,6 +247,8 @@ def run() -> None:
                 else:
                     prod.flush()
                     reconnect_wait("SSE stream ended")
+        except requests.ReadTimeout as e:
+            reconnect_wait(f"SSE read timed out (no data for {read_t}s): {e}")
         except (requests.RequestException, OSError) as e:
             reconnect_wait(f"SSE disconnected: {e}")
         except Exception:

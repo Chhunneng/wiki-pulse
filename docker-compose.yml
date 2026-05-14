@@ -161,6 +161,10 @@ services:
       KAFKA_BOOTSTRAP_SERVERS: kafka-server:9092
       KAFKA_TOPIC: wiki.event.raw
       SSE_STREAM_URL: https://stream.wikimedia.org/v2/stream/recentchange
+      # Close/reconnect if no bytes on SSE for this long (avoids silent infinite block).
+      SSE_READ_TIMEOUT_SEC: "120"
+      # Optional: log WARNING if SSE iterator makes no progress for N seconds (0 = off).
+      SSE_STALL_LOG_SEC: "90"
       # producer.py reads everything below; defaults are sane, override here for tuning.
       KAFKA_ACKS: "all"
       KAFKA_ENABLE_IDEMPOTENCE: "true"

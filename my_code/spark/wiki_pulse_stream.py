@@ -37,6 +37,9 @@ HDFS_OUT = os.environ.get(
     "WIKIPULSE_HIVE_WAREHOUSE",
     "hdfs:///user/cloudera/wiki_pulse/warehouse/wiki_window_agg",
 )
+# Parallel Parquet tasks under the same warehouse _temporary/ path can trigger HDFS lease /
+# FileNotFoundException on small clusters. Default 1 = one task per foreachBatch write (slower, stable).
+PARQUET_WRITE_COALESCE = max(1, int(os.environ.get("WIKIPULSE_PARQUET_WRITE_COALESCE", "1")))
 LOOKUP_CSV = os.environ.get(
     "WIKIPULSE_LOOKUP_CSV",
     "hdfs:///data/static/wiki_domains.csv",
@@ -367,6 +370,8 @@ def write_hive_parquet(batch_df, _batch_id: int) -> None:
             "hr",
         )
     )
+    # Serialize Parquet output tasks to reduce HDFS _temporary lease races (see README).
+    out = out.coalesce(PARQUET_WRITE_COALESCE)
     out.write.mode("append").partitionBy("ds", "hr").format("parquet").save(HDFS_OUT)
 
 
