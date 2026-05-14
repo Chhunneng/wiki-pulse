@@ -19,10 +19,19 @@ export POSTGRES_URL="${POSTGRES_URL:-postgresql://wikipulse:wikipulse_secret@met
 
 SPARK_HOME="${SPARK_HOME:-/opt/spark}"
 if [[ ! -x "${SPARK_HOME}/bin/spark-submit" ]]; then
-  SPARK_HOME="${SPARK_HOME:-/usr/hdp/current/spark2-client}"
+  SPARK_HOME="${SPARK_HOME:-/usr/hdp/current/spark2-client}" 
+  # to fix as the above one line as it will never overwrite this if SPARK_HOME is already set, but try this path if the default doesn't work
+  # SPARK_HOME="/usr/hdp/current/spark2-client"
 fi
 
+# Final validation
+# if [[ ! -x "${SPARK_HOME}/bin/spark-submit" ]]; then
+#   echo "Error: spark-submit not found in expected locations"
+#   exit 1
+# fi
+
 SPARK_RUNTIME_VERSION="${SPARK_RUNTIME_VERSION:-3.1.2}"
+# if packages(spark dependencies) not set via env, specify a list of packages including Kafka integration for Spark in groupId:artifactId:version format and PostgreSQL JDBC driver
 PACKAGES="${WIKIPULSE_SPARK_PACKAGES:-org.apache.spark:spark-sql-kafka-0-10_2.12:${SPARK_RUNTIME_VERSION},org.postgresql:postgresql:42.7.3}"
 
 CK_MAIN_URI="${WIKIPULSE_CHECKPOINT:-hdfs:///user/cloudera/wiki_pulse/checkpoints/main}"
@@ -33,8 +42,10 @@ LOG_DIR="/opt/my_code/logs"
 SPARK_LOG="${LOG_DIR}/spark_streaming.log"
 mkdir -p "${LOG_DIR}"
 
+# timestamp and logging helpers
 ts() { date -Iseconds 2>/dev/null || date '+%Y-%m-%dT%H:%M:%S%z'; }
 log() { printf '[run_spark_stream %s] %s\n' "$(ts)" "$*" >&2; }
+# log() { printf '[run_spark_stream %s] %s\n' "$(ts)" "$@" >&2; }
 
 install_py_deps() {
   if python3 -c 'import psycopg2' >/dev/null 2>&1; then
@@ -56,7 +67,7 @@ install_py_deps() {
       command -v "$py" >/dev/null 2>&1 || continue
       "$py" -m pip install --break-system-packages -q -r "$req" >>"${SPARK_LOG}" 2>&1 \
         || "$py" -m pip install -q -r "$req" >>"${SPARK_LOG}" 2>&1 || true
-      if python3 -c 'import psycopg2' >/dev/null 2>&1; then
+      if python3 -c 'import psycopg2' >/dev/null 2>&1; then # better check with $py?
         log "psycopg2 installed via ${py} pip"
         return 0
       fi
@@ -68,8 +79,8 @@ install_py_deps() {
 
 ensure_hdfs_dirs() {
   for uri in "${CK_MAIN_URI}" "${CK_ACTION_URI}" "${WAREHOUSE_URI}"; do
-    local path="${uri#hdfs://}"
-    if ! hdfs dfs -mkdir -p "${path}" >/dev/null 2>&1; then
+    local path="${uri#hdfs://}" # if uri is hdfs://namenode, ?
+    if ! hdfs dfs -mkdir -p "${path}" >/dev/null 2>&1; then # better check uri directly instead of path?
       log "ERROR hdfs dfs -mkdir failed for ${path}"
       return 13
     fi
@@ -90,6 +101,8 @@ ensure_lookup_csv() {
     log "WARN /opt/my_code/static/wiki_domains.csv not present in container"
   fi
 }
+
+# Start → Validate infra → Ensure deps → Prepare data → Launch Spark
 
 log "pid=$$ starting"
 ensure_hdfs_dirs || exit 13
